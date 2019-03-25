@@ -30,6 +30,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Multimap;
 import com.treasuredata.client.model.ObjectMappers;
+import com.treasuredata.client.model.TDApiKey;
 import com.treasuredata.client.model.TDAuthenticationResult;
 import com.treasuredata.client.model.TDBulkImportParts;
 import com.treasuredata.client.model.TDBulkImportSession;
@@ -40,6 +41,7 @@ import com.treasuredata.client.model.TDConnectionLookupResult;
 import com.treasuredata.client.model.TDDatabase;
 import com.treasuredata.client.model.TDExportJobRequest;
 import com.treasuredata.client.model.TDExportResultJobRequest;
+import com.treasuredata.client.model.TDImportResult;
 import com.treasuredata.client.model.TDJob;
 import com.treasuredata.client.model.TDJobList;
 import com.treasuredata.client.model.TDJobRequest;
@@ -244,6 +246,41 @@ public class TDClient
         return this.<ResultType>doPost(path, queryParam, Optional.<String>absent(), resultTypeClass);
     }
 
+    protected <ResultType> ResultType doPut(String path, Map<String, String> queryParam, File file, Class<ResultType> resultTypeClass)
+            throws TDClientException
+    {
+        checkNotNull(file, "file is null");
+        checkNotNull(resultTypeClass, "resultTypeClass is null");
+
+        TDApiRequest.Builder request = buildPutRequest(path, queryParam);
+        request.setFile(file);
+        return httpClient.call(request.build(), apiKeyCache, resultTypeClass);
+    }
+
+    protected <ResultType> ResultType doPut(String path, Map<String, String> queryParam, byte[] content, int offset, int length, Class<ResultType> resultTypeClass)
+            throws TDClientException
+    {
+        checkNotNull(content, "content is null");
+        checkNotNull(resultTypeClass, "resultTypeClass is null");
+
+        TDApiRequest.Builder request = buildPutRequest(path, queryParam);
+        request.setContent(content, offset, length);
+        return httpClient.call(request.build(), apiKeyCache, resultTypeClass);
+    }
+
+    private TDApiRequest.Builder buildPutRequest(String path, Map<String, String> queryParam)
+    {
+        checkNotNull(path, "path is null");
+        checkNotNull(queryParam, "param is null");
+
+        TDApiRequest.Builder request = TDApiRequest.Builder.PUT(path);
+        for (Map.Entry<String, String> e : queryParam.entrySet()) {
+            request.addQueryParam(e.getKey(), e.getValue());
+        }
+
+        return request;
+    }
+
     protected String doPost(String path)
             throws TDClientException
     {
@@ -274,6 +311,12 @@ public class TDClient
     public TDUser getUser()
     {
         return doGet("/v3/user/show", TDUser.class);
+    }
+
+    @Override
+    public TDApiKey validateApiKey()
+    {
+        return doGet("/v3/user/apikey/validate", TDApiKey.class);
     }
 
     @Override
@@ -576,6 +619,10 @@ public class TDClient
             queryParam.put("result_connection_settings", jobRequest.getResultConnectionSettings().get());
         }
 
+        if (jobRequest.getEngineVersion().isPresent()) {
+            queryParam.put("engine_version", jobRequest.getEngineVersion().get().getEngineVersion());
+        }
+
         if (logger.isDebugEnabled()) {
             logger.debug("submit job: " + jobRequest);
         }
@@ -605,10 +652,10 @@ public class TDClient
     }
 
     @Override
-    public TDJobList listJobs(long fromJobId, long toJobId)
+    public TDJobList listJobs(long from, long to)
             throws TDClientException
     {
-        return doGet(String.format("/v3/job/list?from_id=%d&to_id=%d", fromJobId, toJobId), TDJobList.class);
+        return doGet(String.format("/v3/job/list?from=%d&to=%d", from, to), TDJobList.class);
     }
 
     @Override
@@ -854,6 +901,7 @@ public class TDClient
     public TDSavedQuery saveQuery(TDSaveQueryRequest request)
     {
         String json = toJson(request);
+        logger.debug("saveQuery request:" + json);
         TDSavedQuery result =
                 doPost(
                         buildUrl("/v3/schedule/create", request.getName()),
@@ -867,6 +915,7 @@ public class TDClient
     public TDSavedQuery updateSavedQuery(String name, TDSavedQueryUpdateRequest request)
     {
         String json = request.toJson();
+        logger.debug("updateSaveQuery request:" + json);
         TDSavedQuery result =
                 doPost(
                         buildUrl("/v3/schedule/update", name),
@@ -983,8 +1032,50 @@ public class TDClient
     }
 
     @Override
-    public TDTableDistribution tableDistribution(String databaseName, String tableName)
+    public Optional<TDTableDistribution> tableDistribution(String databaseName, String tableName)
     {
-        return doGet(buildUrl(String.format("/v3/table/distribution/%s/%s", databaseName, tableName)), TDTableDistribution.class);
+        try {
+            TDTableDistribution distribution = doGet(buildUrl(String.format("/v3/table/distribution/%s/%s", databaseName, tableName)), TDTableDistribution.class);
+            return Optional.of(distribution);
+        }
+        catch (TDClientHttpNotFoundException e) {
+            return Optional.absent();
+        }
+    }
+
+    @Override
+    public TDImportResult importFile(String databaseName, String tableName, File file)
+    {
+        return doPut(buildUrl(String.format("/v3/table/import/%s/%s/%s", databaseName, tableName, "msgpack.gz")), ImmutableMap.of(), file, TDImportResult.class);
+    }
+
+    @Override
+    public TDImportResult importFile(String databaseName, String tableName, File file, String id)
+    {
+        return doPut(buildUrl(String.format("/v3/table/import_with_id/%s/%s/%s/%s", databaseName, tableName, id, "msgpack.gz")), ImmutableMap.of(), file, TDImportResult.class);
+    }
+
+    @Override
+    public TDImportResult importBytes(String databaseName, String tableName, byte[] content)
+    {
+        return doPut(buildUrl(String.format("/v3/table/import/%s/%s/%s", databaseName, tableName, "msgpack.gz")), ImmutableMap.of(), content, 0, content.length, TDImportResult.class);
+    }
+
+    @Override
+    public TDImportResult importBytes(String databaseName, String tableName, byte[] content, int offset, int length)
+    {
+        return doPut(buildUrl(String.format("/v3/table/import/%s/%s/%s", databaseName, tableName, "msgpack.gz")), ImmutableMap.of(), content, offset, length, TDImportResult.class);
+    }
+
+    @Override
+    public TDImportResult importBytes(String databaseName, String tableName, byte[] content, String id)
+    {
+        return doPut(buildUrl(String.format("/v3/table/import_with_id/%s/%s/%s/%s", databaseName, tableName, id, "msgpack.gz")), ImmutableMap.of(), content, 0, content.length, TDImportResult.class);
+    }
+
+    @Override
+    public TDImportResult importBytes(String databaseName, String tableName, byte[] content, int offset, int length, String id)
+    {
+        return doPut(buildUrl(String.format("/v3/table/import_with_id/%s/%s/%s/%s", databaseName, tableName, id, "msgpack.gz")), ImmutableMap.of(), content, offset, length, TDImportResult.class);
     }
 }

@@ -5,7 +5,7 @@
   <artifactId>td-client</artifactId>
   <name>Treasure Data Client for Java</name>
   <description>Treasure Data Client for Java.</description>
-  <version>0.8.8-SNAPSHOT</version>
+  <version>0.8.13-SNAPSHOT</version>
   <packaging>jar</packaging>
   <url>https://github.com/treasure-data/td-client-java</url>
 
@@ -95,19 +95,19 @@
     <dependency>
       <groupId>com.squareup.okhttp3</groupId>
       <artifactId>okhttp</artifactId>
-      <version>3.9.0</version>
+      <version>3.12.0</version>
     </dependency>
 
     <dependency>
       <groupId>com.squareup.okhttp3</groupId>
       <artifactId>okhttp-urlconnection</artifactId>
-      <version>3.9.0</version>
+      <version>3.12.0</version>
     </dependency>
 
     <dependency>
       <groupId>com.squareup.okhttp3</groupId>
       <artifactId>mockwebserver</artifactId>
-      <version>3.9.0</version>
+      <version>3.12.0</version>
       <scope>test</scope>
     </dependency>
 
@@ -463,7 +463,7 @@
           <dependency>
             <groupId>com.puppycrawl.tools</groupId>
             <artifactId>checkstyle</artifactId>
-            <version>6.19</version>
+            <version>8.18</version>
           </dependency>
         </dependencies>
       </plugin>

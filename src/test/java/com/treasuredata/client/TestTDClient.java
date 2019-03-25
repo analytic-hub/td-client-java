@@ -35,6 +35,7 @@ import com.google.common.collect.Multimap;
 import com.google.common.io.ByteStreams;
 import com.google.common.io.CharStreams;
 import com.treasuredata.client.model.ObjectMappers;
+import com.treasuredata.client.model.TDApiKey;
 import com.treasuredata.client.model.TDBulkImportSession;
 import com.treasuredata.client.model.TDBulkLoadSessionStartRequest;
 import com.treasuredata.client.model.TDBulkLoadSessionStartResult;
@@ -44,7 +45,9 @@ import com.treasuredata.client.model.TDDatabase;
 import com.treasuredata.client.model.TDExportFileFormatType;
 import com.treasuredata.client.model.TDExportJobRequest;
 import com.treasuredata.client.model.TDExportResultJobRequest;
+import com.treasuredata.client.model.TDImportResult;
 import com.treasuredata.client.model.TDJob;
+import com.treasuredata.client.model.TDJob.EngineVersion;
 import com.treasuredata.client.model.TDJobList;
 import com.treasuredata.client.model.TDJobRequest;
 import com.treasuredata.client.model.TDJobRequestBuilder;
@@ -82,6 +85,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -108,7 +113,6 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 import static com.treasuredata.client.TDClientConfig.ENV_TD_CLIENT_APIKEY;
-
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
@@ -295,9 +299,13 @@ public class TestTDClient
         TDJobList jobs = client.listJobs();
         logger.debug("job list: " + jobs);
 
-        TDJobList jobsInAnIDRange = client.listJobs(34022478, 34022600);
+        TDJobList jobsInAnIDDefault = client.listJobs();
+        logger.debug("job list: " + jobsInAnIDDefault);
+        assertEquals(20, jobsInAnIDDefault.getJobs().size());
+
+        TDJobList jobsInAnIDRange = client.listJobs(0, 100);
         logger.debug("job list: " + jobsInAnIDRange);
-        assertTrue(jobsInAnIDRange.getJobs().size() > 0);
+        assertEquals(101, jobsInAnIDRange.getJobs().size());
 
         // Check getters
         Iterable<Method> getters = FluentIterable.from(TDJob.class.getDeclaredMethods()).filter(new Predicate<Method>()
@@ -405,6 +413,105 @@ public class TestTDClient
                 }
             }
         });
+    }
+
+    @Test
+    public void submitJobWithInvalidEngineVersionPresto() throws Exception
+    {
+        //Invalid engine_version must throw TDClientHttpException
+        try {
+            submitJobWithEngineVersion(TDJob.Type.PRESTO, Optional.of(TDJob.EngineVersion.fromString("AAAAAA")));
+        }
+        catch (TDClientHttpException te) {
+            assertEquals(te.getStatusCode(), 422);
+            assertTrue(te.getMessage().matches(".*Job engine version is invalid.*"));
+        }
+        catch (Exception e) {
+            fail("Unexpected exception:" + e.toString());
+        }
+    }
+
+    @Test
+    public void submitJobWithValidEngineVersionPresto() throws Exception
+    {
+        // Valid engine_version must be accepted
+        try {
+            submitJobWithEngineVersion(TDJob.Type.PRESTO, Optional.of(EngineVersion.fromString("stable")));
+        }
+        catch (Exception e) {
+            fail("Unexpected exception:" + e.toString());
+        }
+    }
+
+    @Test
+    public void submitJobWithInvalidEngineVersionHive() throws Exception
+    {
+        //Invalid engine_version must throw TDClientHttpException
+        try {
+            submitJobWithEngineVersion(TDJob.Type.HIVE, Optional.of(TDJob.EngineVersion.fromString("AAAAAA")));
+        }
+        catch (TDClientHttpException te) {
+            assertEquals(te.getStatusCode(), 422);
+            assertTrue(te.getMessage().matches(".*Job engine version is invalid.*"));
+        }
+        catch (Exception e) {
+            fail("Unexpected exception:" + e.toString());
+        }
+    }
+
+    @Test
+    public void submitJobWithValidEngineVersionHive() throws Exception
+    {
+        // Valid engine_version must be accepted
+        try {
+            submitJobWithEngineVersion(TDJob.Type.HIVE, Optional.of(EngineVersion.fromString("stable")));
+        }
+        catch (Exception e) {
+            fail("Unexpected exception:" + e.toString());
+        }
+    }
+
+    private void submitJobWithEngineVersion(TDJob.Type type, Optional<TDJob.EngineVersion> engineVersion)
+            throws Exception
+    {
+        TDJobRequestBuilder jobRequestBuilder =
+                new TDJobRequestBuilder()
+                        .setType(type)
+                        .setDatabase("sample_datasets")
+                        .setQuery("-- td-client-java test\nselect count(*) cnt from nasdaq");
+        jobRequestBuilder = engineVersion.isPresent() ? jobRequestBuilder.setEngineVersion(engineVersion.get()) : jobRequestBuilder;
+
+        TDJobRequest jobRequest = jobRequestBuilder.createTDJobRequest();
+        String jobId = client.submit(jobRequest);
+        logger.debug("job id: " + jobId);
+
+        TDJobSummary tdJob = waitJobCompletion(jobId);
+        TDJob jobInfo = client.jobInfo(jobId);
+        logger.debug("job show result: " + tdJob);
+        logger.debug("job info: " + jobInfo);
+        Optional<String> schema = jobInfo.getResultSchema();
+        assertTrue(schema.isPresent());
+        assertEquals("[[\"cnt\", \"bigint\"]]", schema.get());
+
+        JSONArray array = client.jobResult(jobId, TDResultFormat.JSON, new Function<InputStream, JSONArray>()
+        {
+            @Override
+            public JSONArray apply(InputStream input)
+            {
+                try {
+                    String result = new String(ByteStreams.toByteArray(input), StandardCharsets.UTF_8);
+                    logger.info("result:\n" + result);
+                    return new JSONArray(result);
+                }
+                catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        });
+
+        assertEquals(1, array.length());
+        assertEquals(1, jobInfo.getNumRecords());
+        assertEquals(8807278, array.getLong(0));
     }
 
     @Test
@@ -1196,7 +1303,10 @@ public class TestTDClient
         // authenticate() method should retrieve apikey, and set it to the TDClient
         // [NOTE] To pass this you need to add password config to ~/.td/td.conf
         Properties p = TDClientConfig.readTDConf();
-        TDClient client = new TDClientBuilder(false).build(); // Set no API key
+        TDClientBuilder clientBuilder = new TDClientBuilder(false); // Set no API key
+        String endpoint = p.getProperty("endpoint");
+        clientBuilder = (endpoint != null) ? clientBuilder.setEndpoint(endpoint) : clientBuilder; //Set endpoint from td.conf if exists
+        TDClient client = clientBuilder.build();
         String user = firstNonNull(p.getProperty("user"), System.getenv("TD_USER"));
         String password = firstNonNull(p.getProperty("password"), System.getenv("TD_PASS"));
         TDClient newClient = client.authenticate(user, password);
@@ -1244,6 +1354,34 @@ public class TestTDClient
     {
         TDUser user = client.getUser();
         logger.trace("user: {}", user);
+    }
+
+    @Test
+    public void validateApiKeyMocked()
+            throws Exception
+    {
+        client = mockClient();
+
+        String expectedKeyJson = "{\"user_id\":1,\"account_id\":2,\"key_type\":\"normal\",\"administrator\":true}";
+
+        TDApiKey expectedKey = ObjectMappers.compactMapper().readValue(expectedKeyJson, TDApiKey.class);
+
+        server.enqueue(new MockResponse().setBody(expectedKeyJson));
+
+        TDApiKey key = client.validateApiKey();
+
+        assertThat(key, is(expectedKey));
+
+        RecordedRequest recordedRequest = server.takeRequest();
+        assertThat(recordedRequest.getPath(), is("/v3/user/apikey/validate"));
+    }
+
+    @Test
+    public void validateApiKey()
+            throws Exception
+    {
+        TDApiKey key = client.validateApiKey();
+        logger.trace("api_key: {}", key);
     }
 
     @Test
@@ -1303,6 +1441,8 @@ public class TestTDClient
         assertEquals(expected.getDatabase(), target.getDatabase());
         assertEquals(expected.getPriority(), target.getPriority());
         assertEquals(expected.getRetryLimit(), target.getRetryLimit());
+        //ToDo engine_version never returned.
+        // assertEquals(expected.getEngineVersion(), target.getEngineVersion());
     }
 
     @Test
@@ -1360,6 +1500,177 @@ public class TestTDClient
             client.deleteSavedQuery(queryName);
         }
 
+        Optional<TDSavedQuery> q = findSavedQuery(queryName);
+        assertTrue(String.format("saved query %s should be deleted", queryName), !q.isPresent());
+    }
+
+    @Test
+    public void saveQueryWithValidEngineVersion()
+    {
+        // Save query with valid engine_version. Must be successful.
+
+        String queryName = newTemporaryName("td_client_test");
+
+        TDSaveQueryRequest query = TDSavedQuery.newBuilder(
+                queryName,
+                TDJob.Type.PRESTO,
+                SAMPLE_DB,
+                "select 1",
+                "Asia/Tokyo")
+                .setCron("0 * * * *")
+                .setPriority(-1)
+                .setRetryLimit(2)
+                .setEngineVersion(EngineVersion.fromString("stable"))
+                .build();
+
+        try {
+            TDSavedQuery result = client.saveQuery(query);
+            assertThat(result.getId(), not(isEmptyOrNullString()));
+            Optional<TDSavedQuery> q = findSavedQuery(queryName);
+            assertTrue(String.format("saved query %s is not found", queryName), q.isPresent());
+        }
+        catch (TDClientException e) {
+            logger.error("failed", e);
+            throw e;
+        }
+        finally {
+            client.deleteSavedQuery(queryName);
+        }
+        Optional<TDSavedQuery> q = findSavedQuery(queryName);
+        assertTrue(String.format("saved query %s should be deleted", queryName), !q.isPresent());
+    }
+
+    @Test
+    public void saveQueryWithInvalidEngineVersion()
+    {
+        // Save query with invalid engine_version. Must be error.
+
+        String queryName = newTemporaryName("td_client_test");
+
+        TDSaveQueryRequest query = TDSavedQuery.newBuilder(
+                queryName,
+                TDJob.Type.PRESTO,
+                SAMPLE_DB,
+                "select 1",
+                "Asia/Tokyo")
+                .setCron("0 * * * *")
+                .setPriority(-1)
+                .setRetryLimit(2)
+                .setEngineVersion(TDJob.EngineVersion.fromString("DUMMY_VERSION"))
+                .build();
+
+        try {
+            TDSavedQuery result = client.saveQuery(query);
+            fail("Invalid engine_version must not be accepted");
+        }
+        catch (TDClientHttpException te) {
+            logger.debug(te.toString());
+            assertEquals(te.getStatusCode(), 422);
+            assertTrue(te.getMessage().matches(".*Engine version is not included.*"));
+        }
+        catch (TDClientException e) {
+            logger.error("failed", e);
+            throw e;
+        }
+        finally {
+            Optional<TDSavedQuery> q = findSavedQuery(queryName);
+            if (q.isPresent()) {
+                client.deleteSavedQuery(queryName);
+            }
+        }
+        Optional<TDSavedQuery> q = findSavedQuery(queryName);
+        assertTrue(String.format("saved query %s should be deleted", queryName), !q.isPresent());
+    }
+
+    @Test
+    public void updateQueryWithValidEngineVersion()
+    {
+        // Test engine_version update. Updated engine_version is valid one, so must be successful.
+
+        String queryName = newTemporaryName("td_client_test");
+
+        TDSaveQueryRequest query = TDSavedQuery.newBuilder(
+                queryName,
+                TDJob.Type.HIVE,
+                SAMPLE_DB,
+                "select 1",
+                "Asia/Tokyo")
+                .setCron("0 * * * *")
+                .setPriority(-1)
+                .setRetryLimit(2)
+                .setEngineVersion(EngineVersion.fromString("experimental"))
+                .build();
+
+        try {
+            TDSavedQuery result = client.saveQuery(query);
+            assertThat(result.getId(), not(isEmptyOrNullString()));
+            Optional<TDSavedQuery> q = findSavedQuery(queryName);
+            assertTrue(String.format("saved query %s is not found", queryName), q.isPresent());
+            // Update
+            TDSavedQueryUpdateRequest query2 =
+                    TDSavedQuery.newUpdateRequestBuilder()
+                            .setQuery("select 2")
+                            .setEngineVersion(EngineVersion.fromString("stable"))
+                            .build();
+            TDSavedQuery updated = client.updateSavedQuery(queryName, query2);
+        }
+        catch (TDClientException e) {
+            logger.error("failed", e);
+            throw e;
+        }
+        finally {
+            client.deleteSavedQuery(queryName);
+        }
+        Optional<TDSavedQuery> q = findSavedQuery(queryName);
+        assertTrue(String.format("saved query %s should be deleted", queryName), !q.isPresent());
+    }
+
+    @Test
+    public void updateQueryWithInvalidEngineVersion()
+    {
+        // Test engine_version update. Updated engine_version is invalid one, so must be error.
+
+        String queryName = newTemporaryName("td_client_test");
+
+        TDSaveQueryRequest query = TDSavedQuery.newBuilder(
+                queryName,
+                TDJob.Type.HIVE,
+                SAMPLE_DB,
+                "select 1",
+                "Asia/Tokyo")
+                .setCron("0 * * * *")
+                .setPriority(-1)
+                .setRetryLimit(2)
+                .setEngineVersion(EngineVersion.fromString("experimental"))
+                .build();
+
+        try {
+            TDSavedQuery result = client.saveQuery(query);
+            assertThat(result.getId(), not(isEmptyOrNullString()));
+            Optional<TDSavedQuery> q = findSavedQuery(queryName);
+            assertTrue(String.format("saved query %s is not found", queryName), q.isPresent());
+            // Update
+            TDSavedQueryUpdateRequest query2 =
+                    TDSavedQuery.newUpdateRequestBuilder()
+                            .setQuery("select 2")
+                            .setEngineVersion(TDJob.EngineVersion.fromString("DUMMY_VERSION"))
+                            .build();
+            TDSavedQuery updated = client.updateSavedQuery(queryName, query2);
+            fail("Invalid engine_version must not be accepted");
+            logger.error(updated.toString());
+        }
+        catch (TDClientHttpException te) {
+            logger.debug(te.toString());
+            assertEquals(te.getStatusCode(), 422);
+            assertTrue(te.getMessage().matches(".*Engine version is not included.*"));
+        }
+        catch (TDClientException e) {
+            logger.error("failed", e);
+            throw e;
+        }
+        finally {
+            client.deleteSavedQuery(queryName);
+        }
         Optional<TDSavedQuery> q = findSavedQuery(queryName);
         assertTrue(String.format("saved query %s should be deleted", queryName), !q.isPresent());
     }
@@ -1612,13 +1923,114 @@ public class TestTDClient
         client = mockClient();
         server.enqueue(new MockResponse().setBody("{\"user_table_id\":123,\"bucket_count\":512,\"partition_function\":\"hash\",\"columns\":[{\"key\":\"col1\",\"type\":\"int\",\"name\":\"col1\"},{\"key\":\"col2\",\"type\":\"int\",\"name\":\"col2\"}]}"));
 
-        TDTableDistribution distribution = client.tableDistribution("sample_datasets", "www_access");
+        Optional<TDTableDistribution> distributionOpt = client.tableDistribution("sample_datasets", "www_access");
+        assertTrue(distributionOpt.isPresent());
+        TDTableDistribution distribution = distributionOpt.get();
         assertEquals(123, distribution.getUserTableId());
         assertEquals(512, distribution.getBucketCount());
         assertEquals("hash", distribution.getPartitionFunction());
         assertEquals(2, distribution.getColumns().size());
         assertEquals("col1", distribution.getColumns().get(0).getName());
         assertEquals("col2", distribution.getColumns().get(1).getName());
+    }
+
+    @Test
+    public void testMissingTableDistribution()
+    {
+        Optional<TDTableDistribution> distributionOpt = client.tableDistribution("sample_datasets", "www_access");
+        assertFalse(distributionOpt.isPresent());
+    }
+
+    @Test
+    public void testImportFile()
+            throws Exception
+    {
+        client = mockClient();
+        server.enqueue(new MockResponse().setBody("{\"unique_id\":\"4288048cf8f811e88b560a87157ac806\",\"md5_hex\":\"a34e7c79aa6b6cc48e6e1075c2215a8b\",\"database\":\"db\",\"table\":\"tbl\",\"elapsed_time\":10}"));
+
+        File tmpFile = createTempMsgpackGz("import", 10);
+        TDImportResult result = client.importFile("db", "tbl", tmpFile);
+
+        assertEquals(result.getDatabaseName(), "db");
+        assertEquals(result.getTableName(), "tbl");
+        assertEquals(result.getElapsedTime(), 10);
+        assertEquals(result.getMd5Hex(), "a34e7c79aa6b6cc48e6e1075c2215a8b");
+        assertEquals(result.getUniqueId(), "4288048cf8f811e88b560a87157ac806");
+    }
+
+    @Test
+    public void testImportFileWithId()
+            throws Exception
+    {
+        client = mockClient();
+        server.enqueue(new MockResponse().setBody("{\"unique_id\":\"4288048cf8f811e88b560a87157ac806\",\"md5_hex\":\"a34e7c79aa6b6cc48e6e1075c2215a8b\",\"database\":\"db\",\"table\":\"tbl\",\"elapsed_time\":10}"));
+
+        File tmpFile = createTempMsgpackGz("import", 10);
+        TDImportResult result = client.importFile("db", "tbl", tmpFile, "4288048cf8f811e88b560a87157ac806");
+
+        assertEquals(result.getDatabaseName(), "db");
+        assertEquals(result.getTableName(), "tbl");
+        assertEquals(result.getElapsedTime(), 10);
+        assertEquals(result.getMd5Hex(), "a34e7c79aa6b6cc48e6e1075c2215a8b");
+        assertEquals(result.getUniqueId(), "4288048cf8f811e88b560a87157ac806");
+    }
+
+    @Test
+    public void testImportBytes()
+            throws Exception
+    {
+        client = mockClient();
+        server.enqueue(new MockResponse().setBody("{\"unique_id\":\"4288048cf8f811e88b560a87157ac806\",\"md5_hex\":\"a34e7c79aa6b6cc48e6e1075c2215a8b\",\"database\":\"db\",\"table\":\"tbl\",\"elapsed_time\":10}"));
+
+        File tmpFile = createTempMsgpackGz("import", 10);
+        byte[] bytes = ByteStreams.toByteArray(new FileInputStream(tmpFile));
+        TDImportResult result = client.importBytes("db", "tbl", bytes);
+
+        assertEquals(result.getDatabaseName(), "db");
+        assertEquals(result.getTableName(), "tbl");
+        assertEquals(result.getElapsedTime(), 10);
+        assertEquals(result.getMd5Hex(), "a34e7c79aa6b6cc48e6e1075c2215a8b");
+        assertEquals(result.getUniqueId(), "4288048cf8f811e88b560a87157ac806");
+    }
+
+    @Test
+    public void testImportBytesWithId()
+            throws Exception
+    {
+        client = mockClient();
+        server.enqueue(new MockResponse().setBody("{\"unique_id\":\"4288048cf8f811e88b560a87157ac806\",\"md5_hex\":\"a34e7c79aa6b6cc48e6e1075c2215a8b\",\"database\":\"db\",\"table\":\"tbl\",\"elapsed_time\":10}"));
+
+        File tmpFile = createTempMsgpackGz("import", 10);
+        byte[] bytes = ByteStreams.toByteArray(new FileInputStream(tmpFile));
+        TDImportResult result = client.importBytes("db", "tbl", bytes, "4288048cf8f811e88b560a87157ac806");
+
+        assertEquals(result.getDatabaseName(), "db");
+        assertEquals(result.getTableName(), "tbl");
+        assertEquals(result.getElapsedTime(), 10);
+        assertEquals(result.getMd5Hex(), "a34e7c79aa6b6cc48e6e1075c2215a8b");
+        assertEquals(result.getUniqueId(), "4288048cf8f811e88b560a87157ac806");
+    }
+
+    private File createTempMsgpackGz(String prefix, int numRows)
+            throws IOException
+    {
+        int count = 0;
+        final long time = System.currentTimeMillis() / 1000;
+
+        File tmpFile = File.createTempFile(prefix, ".msgpack.gz");
+        try (OutputStream out = new GZIPOutputStream(new FileOutputStream(tmpFile));
+             MessagePacker packer = MessagePack.newDefaultPacker(out)) {
+            for (int n = 0; n < numRows; ++n) {
+                ValueFactory.MapBuilder b = ValueFactory.newMapBuilder();
+                b.put(ValueFactory.newString("time"), ValueFactory.newInteger(time + count));
+                b.put(ValueFactory.newString("event"), ValueFactory.newString("log" + count));
+                b.put(ValueFactory.newString("description"), ValueFactory.newString("sample data"));
+                packer.packValue(b.build());
+                count += 1;
+            }
+        }
+
+        return tmpFile;
     }
 
     private static String apikey()
